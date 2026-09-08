@@ -1,0 +1,206 @@
+const DB='FabricInventoryMobile',VER=2,MS='masters',RS='rolls',CORE=90;
+const WIDTHS=['10cm','11cm','13cm','15cm','18cm','21cm','23cm','25cm','26cm','27cm','29cm','31cm','기타'];
+const SEEDS=[
+['종이류','유포지','옥그라',150],['종이류','유포지','황박',250],['종이류','아트지','황박',240],['종이류','아트지','옥그라',140],['종이류','모조지','옥그라',150],
+['라미네이팅','투명풀라미','없음',10],['라미네이팅','무광풀라미','없음',10],['라미네이팅','무광열라미','없음',20],['라미네이팅','투명열라미','없음',15],['라미네이팅','무광접착라미','없음',50],['라미네이팅','투명접착라미','없음',35],['라미네이팅','무광바코드라미','없음',40],['라미네이팅','투명바코드라미','없음',35],
+['은/금','은무데25','옥그라',100],['은/금','은무데25','황박',210],['은/금','은무데50','옥그라',120],['은/금','은무데50','황박',230],['은/금','은무지','황박',210],['은/금','은무보이드','옥그라',120],['은/금','은광데25','옥그라',90],['은/금','은광데25','황박',220],['은/금','은광데50','황박',230],['은/금','은광데50','옥그라',120],['은/금','은광PE','백박',150],['은/금','은광PP','옥그라',120],['은/금','은광지','옥그라',130],['은/금','금광지','옥그라',120],
+['투명/백색','투명데드롱25','옥그라',110],['투명/백색','투명데드롱25','황박',210],['투명/백색','투명데드롱50','옥그라',130],['투명/백색','투명데드롱50','황박',240],['투명/백색','투명OPP50','황박',190],['투명/백색','투명OPP50','옥그라',110],['투명/백색','투명PE','옥그라',150],['투명/백색','투명PET65','황박',200],['투명/백색','백색PE','옥그라',150],
+['특수원단','홀로그램','옥그라',130],['특수원단','홀로그램PET','옥그라',130],
+['특수원단','펄지','옥그라',150],['특수원단','프라이맥스','백박',130],['특수원단','헤어라인','옥그라',120],['특수원단','WTS','백박',180],['특수원단','홀로그램(모자이크)','백박',220],
+['종이류','사탕수수지','옥그라',190],['종이류','크래프트지','옥그라',150],['종이류','아트지300','황박',430],['종이류','백색크래프트지','옥그라',170],
+['투명/백색','백색데드롱75','황박',280],
+['은/금','은무데75','황박',260],['은/금','금무지','옥그라',130]
+].map(([category,fabricName,liner,thicknessMicron])=>({key:`${category}|${fabricName}|${liner}`,category,fabricName,liner,thicknessMicron,coreDiameterMm:CORE,maxRollLengthM:0,updatedAt:new Date().toISOString()}));
+let db,state={category:'',fabric:'',liner:'',width:'',editing:null},installPrompt=null;const $=x=>document.getElementById(x);
+const req=r=>new Promise((ok,no)=>{r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)}),done=t=>new Promise((ok,no)=>{t.oncomplete=ok;t.onerror=()=>no(t.error)});
+
+// One-time upgrades preserve existing user-entered values and roll IDs.
+async function openDb(){
+ db=await new Promise((ok,no)=>{
+  let r=indexedDB.open(DB,VER);
+  r.onupgradeneeded=()=>{
+   let d=r.result;
+   if(!d.objectStoreNames.contains(MS))d.createObjectStore(MS,{keyPath:'key'});
+   if(!d.objectStoreNames.contains(RS)){
+    let s=d.createObjectStore(RS,{keyPath:'id',autoIncrement:true});
+    s.createIndex('spec','specKey');
+   }
+   if(!d.objectStoreNames.contains('meta'))d.createObjectStore('meta');
+  };
+  r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error);
+ });
+ await migrateSeeds();
+}
+
+async function migrateSeeds(){
+ let t=db.transaction([MS,RS,'meta'],'readwrite'),
+     s=t.objectStore(MS),rs=t.objectStore(RS),meta=t.objectStore('meta');
+ let migrated=await req(meta.get('seed-v4'));
+ if(!migrated){
+  // Rename only matching seeded entries, never delete or overwrite a
+  // separately existing target. Move roll references without changing IDs.
+  for(const [category,fabricName,oldLiner,newLiner,thickness] of [
+   ['종이류','아트지300','미확인','황박',430],
+   ['종이류','아트지300','없음','황박',430],
+   ['투명/백색','백색데드롱75','미확인','황박',280],
+   ['투명/백색','백색데드롱75','없음','황박',280],
+   ['은/금','금무지','옥박','옥그라',130]
+  ]){
+   let oldKey=category+'|'+fabricName+'|'+oldLiner,
+       newKey=category+'|'+fabricName+'|'+newLiner;
+   let old=await req(s.get(oldKey)),target=await req(s.get(newKey));
+   if(!old || target || Number(old.thicknessMicron)!==thickness)continue;
+   let entries=await req(rs.index('spec').getAll());
+   let affected=entries.filter(r=>r.specKey.startsWith(oldKey+'|'));
+   let conflict=false;
+   for(const r of affected){
+    if((await req(rs.index('spec').getAll(
+      r.specKey.replace(oldKey+'|',newKey+'|')))).length){
+     conflict=true;break;
+    }
+   }
+   if(conflict)continue;
+   s.put({...old,key:newKey,liner:newLiner,updatedAt:new Date().toISOString()});
+   s.delete(oldKey);
+   for(const r of affected)
+    rs.put({...r,specKey:newKey+r.specKey.slice(oldKey.length)});
+  }
+  let silver=await req(s.get('은/금|은무지|황박'));
+  if(silver&&Number(silver.thicknessMicron)===220)
+   s.put({...silver,thicknessMicron:210,updatedAt:new Date().toISOString()});
+  meta.put(true,'seed-v4');
+ }
+ for(const m of SEEDS)if(!await req(s.get(m.key)))s.add(m);
+ await done(t);
+}
+async function all(n){return await req(db.transaction(n).objectStore(n).getAll())}
+async function master(){if(!state.category||!state.fabric||!state.liner)return null;return await req(db.transaction(MS).objectStore(MS).get(`${state.category}|${state.fabric}|${state.liner}`))}
+async function putM(m){let t=db.transaction(MS,'readwrite');t.objectStore(MS).put(m);await done(t)}
+const spec=()=>`${state.category}|${state.fabric}|${state.liner}|${state.width}`;
+async function rolls(){if(!state.width)return[];return await req(db.transaction(RS).objectStore(RS).index('spec').getAll(spec()))}
+async function putR(r){let t=db.transaction(RS,'readwrite');t.objectStore(RS).put(r);await done(t)}async function delR(id){let t=db.transaction(RS,'readwrite');t.objectStore(RS).delete(id);await done(t)}
+const fmt=(n,d=2)=>Number(n||0).toLocaleString('ko-KR',{maximumFractionDigits:d});
+function calc(D,d,t){return D>d&&d>0&&t>0?Math.PI*(D*D-d*d)/(4*t):0}
+function fill(el,a,v,p){el.innerHTML=`<option value="">${p}</option>`+a.map(x=>`<option ${x===v?'selected':''}>${x}</option>`).join('')}
+async function selectors(){let m=await all(MS),cats=[...new Set(m.map(x=>x.category))],box=$('categoryButtons');box.innerHTML='';cats.forEach(c=>{let b=document.createElement('button');b.className='chip'+(state.category===c?' active':'');b.textContent=c;b.onclick=()=>{state={...state,category:c,fabric:'',liner:'',width:''};selectors()};box.appendChild(b)});let f=[...new Set(m.filter(x=>x.category===state.category).map(x=>x.fabricName))];fill($('fabricSelect'),f,state.fabric,'원단 선택');let l=[...new Set(m.filter(x=>x.category===state.category&&x.fabricName===state.fabric).map(x=>x.liner))];fill($('linerSelect'),l,state.liner,'후지 선택');fill($('widthSelect'),WIDTHS,state.width,'폭 선택');await refresh()}
+async function refresh(){let m=await master();if(!m){$('thicknessValue').textContent=state.liner?'미설정':'-';$('coreValue').textContent=state.liner?'90 mm':'-';$('maxLengthValue').textContent='미설정';$('masterState').textContent=state.liner?'이 조합은 아직 값이 없어.':'원단과 후지를 선택해줘.'}else{$('thicknessValue').textContent=`${fmt(m.thicknessMicron,3)} μm`;$('coreValue').textContent=`${fmt(m.coreDiameterMm)} mm`;$('maxLengthValue').textContent=m.maxRollLengthM>0?`${fmt(m.maxRollLengthM)} m`:'미설정';$('masterState').textContent=`${m.liner} 기준값`}await refreshRolls()}
+async function refreshRolls(){let list=$('rollList');if(!state.width){$('totalStock').textContent='0 m';$('rollCount').textContent='0롤';list.innerHTML='<div class="empty">폭까지 선택하면 재고가 보여.</div>';return}let a=(await rolls()).sort((x,y)=>x.rollNo-y.rollNo);$('totalStock').textContent=`${fmt(a.reduce((s,r)=>s+Number(r.savedLengthM||0),0))} m`;$('rollCount').textContent=`${a.length}롤`;list.innerHTML='';if(!a.length){list.innerHTML='<div class="empty">등록된 롤이 없어.</div>';return}a.forEach(r=>{let n=$('rollTemplate').content.cloneNode(true);n.querySelector('.rname').textContent=`${r.rollNo}번 롤 · ${r.isNewRoll?'새 롤':'사용중'}`;n.querySelector('.rsub').textContent=r.isNewRoll?(r.memo||'미사용'):`전체 지름 ${fmt(r.outerDiameterMm)}mm${r.memo?' · '+r.memo:''}`;n.querySelector('.rlen').textContent=`${fmt(r.savedLengthM)} m`;n.querySelector('.edit').onclick=()=>openRoll(r);n.querySelector('.del').onclick=async()=>{if(confirm(`${r.rollNo}번 롤을 삭제할까?`)){await delR(r.id);refreshRolls()}};list.appendChild(n)})}
+async function openMaster(){if(!state.fabric||!state.liner){alert('원단과 후지를 먼저 선택해줘.');return}let m=await master();$('masterDialogTitle').textContent=`${state.fabric} / ${state.liner}`;$('masterThickness').value=m?.thicknessMicron??'';$('masterCore').value=m?.coreDiameterMm??90;$('masterMax').value=m?.maxRollLengthM||'';$('masterDialog').showModal()}
+async function saveMaster(){let t=+$('masterThickness').value,c=+$('masterCore').value,x=+$('masterMax').value||0;if(!(t>0&&c>0)){alert('두께와 지관 지름을 확인해줘.');return false}await putM({key:`${state.category}|${state.fabric}|${state.liner}`,category:state.category,fabricName:state.fabric,liner:state.liner,thicknessMicron:t,coreDiameterMm:c,maxRollLengthM:x,updatedAt:new Date().toISOString()});await refresh();return true}
+
+let rollCalculation={master:null,estimated:null,valid:false,manualOverride:false,request:0};
+
+function markRollResult(message,valid=false){
+ $('calcResult').textContent=message;
+ $('calcResult').dataset.valid=valid?'true':'false';
+}
+
+async function openRoll(r=null,forceNew=false){
+ if(!state.category||!state.fabric||!state.liner||!state.width){
+  alert('원단, 후지, 폭을 모두 선택해줘.');return;
+ }
+ let m=await master();
+ if(!m){alert('먼저 원단 기본값을 저장해줘.');return;}
+ state.editing=r;
+ rollCalculation={master:m,estimated:null,valid:false,manualOverride:false,request:rollCalculation.request+1};
+ let a=await rolls(),no=r?.rollNo??(a.length?Math.max(...a.map(x=>x.rollNo))+1:1);
+ $('rollDialogTitle').textContent=r?`${no}번 롤 수정`:`${no}번 롤 등록`;
+ $('rollProfileInfo').textContent=`${state.fabric} / ${state.liner} / ${state.width} · 두께 ${fmt(m.thicknessMicron,3)}μm · 지관 ${fmt(m.coreDiameterMm)}mm`;
+ $('isNewRoll').checked=r?.isNewRoll??forceNew;
+ $('outerDiameter').value=r?.outerDiameterMm||'';
+ $('savedLength').value=r?.savedLengthM??(forceNew&&m.maxRollLengthM>0?m.maxRollLengthM:'');
+ $('memo').value=r?.memo||'';
+ syncNew(m);
+ $('rollDialog').showModal();
+}
+
+function syncNew(m){
+ if(!m)return;
+ let n=$('isNewRoll').checked;
+ $('outerRow').classList.toggle('hidden',n);
+ if(n){
+  rollCalculation.estimated=m.maxRollLengthM>0?m.maxRollLengthM:null;
+  rollCalculation.valid=m.maxRollLengthM>0;
+  if(m.maxRollLengthM>0){
+   $('savedLength').value=m.maxRollLengthM;
+   markRollResult(`새 롤: ${fmt(m.maxRollLengthM)} m`,true);
+  }else{
+   $('savedLength').value='';
+   markRollResult('새 롤 등록 전에 한 롤 최대길이를 설정해줘.');
+  }
+ }else{
+  updateRollCalculation();
+ }
+}
+
+// The diameter input is the source of truth. A manual saved-length edit
+// is allowed, but changing the diameter again recalculates the estimate.
+function updateRollCalculation(){
+ const m=rollCalculation.master;
+ if(!m||$('isNewRoll').checked)return;
+ const raw=$('outerDiameter').value.trim();
+ const D=Number(raw);
+ if(raw===''||!Number.isFinite(D)||D<=m.coreDiameterMm){
+  rollCalculation.valid=false;
+  rollCalculation.estimated=null;
+  $('savedLength').value='';
+  markRollResult(raw===''?'지름을 입력하면 잔량이 자동 계산돼.':
+   `전체 지름은 지관 ${fmt(m.coreDiameterMm)}mm보다 커야 해.`);
+  return;
+ }
+ if(!(m.thicknessMicron>0)){
+  rollCalculation.valid=false;rollCalculation.estimated=null;
+  $('savedLength').value='';
+  markRollResult('원단 두께를 먼저 설정해줘.');
+  return;
+ }
+ let x=calc(D,m.coreDiameterMm,m.thicknessMicron);
+ if(m.maxRollLengthM>0)x=Math.min(x,m.maxRollLengthM);
+ if(!Number.isFinite(x)||x<0){
+  rollCalculation.valid=false;rollCalculation.estimated=null;
+  $('savedLength').value='';
+  markRollResult('계산할 수 없는 지름이야.');
+  return;
+ }
+ rollCalculation.valid=true;
+ rollCalculation.estimated=x;
+ $('savedLength').value=x.toFixed(2);
+ markRollResult(`계산 잔량: 약 ${fmt(x)} m`,true);
+}
+
+async function saveRoll(){
+ let m=rollCalculation.master,isNew=$('isNewRoll').checked;
+ if(!m)return false;
+ if(isNew&&!(m.maxRollLengthM>0)){
+  alert('새 롤은 한 롤 최대길이를 먼저 설정해줘.');return false;
+ }
+ let raw=$('savedLength').value.trim(),s=Number(raw);
+ if(raw===''||!Number.isFinite(s)||s<0){
+  alert('저장 재고를 확인해줘.');return false;
+ }
+ if(m.maxRollLengthM>0&&s>m.maxRollLengthM){
+  alert('저장 재고가 한 롤 최대길이보다 커.');return false;
+ }
+ let D=0,e=m.maxRollLengthM;
+ if(!isNew){
+  D=Number($('outerDiameter').value);
+  if(!rollCalculation.valid||!(D>m.coreDiameterMm)){
+   alert('지름을 올바르게 입력해줘.');return false;
+  }
+  e=calc(D,m.coreDiameterMm,m.thicknessMicron);
+  if(m.maxRollLengthM>0)e=Math.min(e,m.maxRollLengthM);
+ }
+ let a=await rolls(),no=state.editing?.rollNo??(a.length?Math.max(...a.map(x=>x.rollNo))+1:1);
+ await putR({...state.editing,specKey:spec(),rollNo:no,isNewRoll:isNew,outerDiameterMm:D,
+  estimatedLengthM:e,savedLengthM:s,memo:$('memo').value.trim(),updatedAt:new Date().toISOString()});
+ await refreshRolls();return true;
+}
+function download(blob,name){let a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}const stamp=()=>new Date().toISOString().slice(0,10).replaceAll('-','');
+async function backup(){download(new Blob([JSON.stringify({version:1,masters:await all(MS),rolls:await all(RS)},null,2)],{type:'application/json'}),`fabric_inventory_backup_${stamp()}.json`)}
+async function restore(f){try{let d=JSON.parse(await f.text());if(!Array.isArray(d.masters)||!Array.isArray(d.rolls))throw 0;let t=db.transaction([MS,RS],'readwrite'),ms=t.objectStore(MS),rs=t.objectStore(RS);ms.clear();rs.clear();d.masters.forEach(x=>ms.put(x));d.rolls.forEach(x=>rs.put(x));await done(t);alert('복원 완료.');state={category:'',fabric:'',liner:'',width:'',editing:null};selectors()}catch{alert('백업 파일을 읽지 못했어.')}}
+function crc32(b){let c=0xffffffff;for(const v of b){c^=v;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0)}return(c^0xffffffff)>>>0}const u16=n=>[n&255,n>>>8&255],u32=n=>[n&255,n>>>8&255,n>>>16&255,n>>>24&255],utf8=s=>new TextEncoder().encode(s);
+function zip(files){let out=[],cen=[],off=0;for(const[n,c]of files){let N=utf8(n),D=utf8(c),z=crc32(D),L=new Uint8Array([...u32(0x04034b50),...u16(20),...u16(0),...u16(0),...u16(0),...u16(0),...u32(z),...u32(D.length),...u32(D.length),...u16(N.length),...u16(0),...N]);out.push(L,D);cen.push(new Uint8Array([...u32(0x02014b50),...u16(20),...u16(20),...u16(0),...u16(0),...u16(0),...u16(0),...u32(z),...u32(D.length),...u32(D.length),...u16(N.length),...u16(0),...u16(0),...u16(0),...u16(0),...u32(0),...u32(off),...N]));off+=L.length+D.length}let cs=cen.reduce((s,x)=>s+x.length,0),n=files.length,E=new Uint8Array([...u32(0x06054b50),...u16(0),...u16(0),...u16(n),...u16(n),...u32(cs),...u32(off),...u16(0)]);return new Blob([...out,...cen,E],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})}
+const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');function col(n){let s='';while(n){n--;s=String.fromCharCode(65+n%26)+s;n=Math.floor(n/26)}return s}function sheet(rows){return`<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>`+rows.map((r,i)=>`<row r="${i+1}">`+r.map((v,j)=>typeof v==='number'?`<c r="${col(j+1)}${i+1}"><v>${v}</v></c>`:`<c r="${col(j+1)}${i+1}" t="inlineStr"><is><t>${esc(v)}</t></is></c>`).join('')+'</row>').join('')+'</sheetData></worksheet>'}
+async function xlsx(){let m=await all(MS),r=await all(RS),mr=[['분류','원단명','후지','두께(μm)','지관(mm)','한 롤 최대길이(m)','수정일'],...m.map(x=>[x.category,x.fabricName,x.liner,x.thicknessMicron,x.coreDiameterMm,x.maxRollLengthM||'',x.updatedAt||''])],rr=[['분류','원단명','후지','폭','롤번호','상태','전체지름(mm)','계산잔량(m)','저장재고(m)','메모','수정일'],...r.map(x=>{let[a,b,c,d]=x.specKey.split('|');return[a,b,c,d,x.rollNo,x.isNewRoll?'새 롤':'사용중',x.outerDiameterMm||'',x.estimatedLengthM||0,x.savedLengthM||0,x.memo||'',x.updatedAt||'']})];download(zip([['[Content_Types].xml','<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'],['_rels/.rels','<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'],['xl/workbook.xml','<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="원단마스터" sheetId="1" r:id="rId1"/><sheet name="롤재고" sheetId="2" r:id="rId2"/></sheets></workbook>'],['xl/_rels/workbook.xml.rels','<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>'],['xl/worksheets/sheet1.xml',sheet(mr)],['xl/worksheets/sheet2.xml',sheet(rr)]]),`fabric_inventory_${stamp()}.xlsx`)}
+function bind(){$('fabricSelect').onchange=e=>{state.fabric=e.target.value;state.liner='';state.width='';selectors()};$('linerSelect').onchange=e=>{state.liner=e.target.value;state.width='';selectors()};$('widthSelect').onchange=e=>{state.width=e.target.value;refresh()};$('editMasterBtn').onclick=openMaster;$('masterForm').onsubmit=async e=>{e.preventDefault();if(await saveMaster())$('masterDialog').close()};$('addNewRollBtn').onclick=()=>openRoll(null,true);$('addUsedRollBtn').onclick=()=>openRoll();$('isNewRoll').onchange=()=>syncNew(rollCalculation.master);$('outerDiameter').addEventListener('input',updateRollCalculation);$('rollForm').onsubmit=async e=>{e.preventDefault();if(await saveRoll())$('rollDialog').close()};$('exportXlsxBtn').onclick=xlsx;$('backupBtn').onclick=backup;$('restoreInput').onchange=e=>{let f=e.target.files[0];if(f&&confirm('현재 데이터를 지우고 이 백업으로 복원할까?'))restore(f);e.target.value=''};document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;$('installBtn').classList.remove('hidden')});$('installBtn').onclick=async()=>{if(installPrompt){installPrompt.prompt();await installPrompt.userChoice;installPrompt=null;$('installBtn').classList.add('hidden')}}}
+(async()=>{await openDb();bind();await selectors();if('serviceWorker'in navigator)navigator.serviceWorker.register('./service-worker.js').catch(()=>{})})();
